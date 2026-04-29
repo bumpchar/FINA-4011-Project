@@ -10,36 +10,57 @@ st.set_page_config(
     layout="wide"
 )
 
-# -----------------------------
-# Styling
-# -----------------------------
 st.markdown("""
 <style>
 .stApp {
     background: linear-gradient(135deg, #eef2ff 0%, #f8fafc 45%, #e0f2fe 100%);
 }
-.card {
-    background-color: white;
-    padding: 22px;
-    border-radius: 18px;
-    box-shadow: 0px 4px 15px rgba(0,0,0,0.08);
-    margin-bottom: 18px;
-}
 </style>
 """, unsafe_allow_html=True)
 
-# -----------------------------
-# Header
-# -----------------------------
 st.title("📈 DCF Valuation Model")
 st.write("Estimate a stock’s intrinsic value and compare it to the current market price.")
 
-# -----------------------------
-# Sidebar Inputs
-# -----------------------------
 st.sidebar.header("Valuation Inputs")
 
 ticker = st.sidebar.text_input("Stock Ticker", value="TSM").upper()
+
+@st.cache_data(ttl=3600)
+def get_market_price(stock_ticker):
+    try:
+        stock = yf.Ticker(stock_ticker)
+        price_data = stock.history(period="1mo")
+
+        if not price_data.empty:
+            return float(price_data["Close"].dropna().iloc[-1])
+        return None
+    except Exception:
+        return None
+
+auto_price = get_market_price(ticker)
+
+st.sidebar.subheader("Market Price")
+
+use_manual_price = st.sidebar.checkbox(
+    "Use manual market price",
+    value=True if auto_price is None else False
+)
+
+manual_price = st.sidebar.number_input(
+    "Manual Market Price ($)",
+    value=250.00,
+    step=1.00
+)
+
+if use_manual_price:
+    current_price = manual_price
+else:
+    current_price = auto_price
+
+if auto_price is None:
+    st.sidebar.warning("Live market price could not load. Manual price is being used.")
+else:
+    st.sidebar.success(f"Live price loaded: ${auto_price:,.2f}")
 
 st.sidebar.subheader("Operating Assumptions")
 
@@ -126,37 +147,14 @@ shares_outstanding = st.sidebar.number_input(
     step=10.0
 )
 
-# -----------------------------
-# Market Price Function
-# -----------------------------
-@st.cache_data(ttl=3600)
-def get_market_price(stock_ticker):
-    try:
-        stock = yf.Ticker(stock_ticker)
-        price_data = stock.history(period="5d")
-
-        if not price_data.empty:
-            return float(price_data["Close"].iloc[-1])
-        return None
-    except Exception:
-        return None
-
-current_price = get_market_price(ticker)
-
-# -----------------------------
-# Validation
-# -----------------------------
 if wacc <= terminal_growth:
-    st.error("WACC must be greater than the terminal growth rate for the terminal value formula to work.")
+    st.error("WACC must be greater than the terminal growth rate.")
     st.stop()
 
 if shares_outstanding <= 0:
     st.error("Shares outstanding must be greater than zero.")
     st.stop()
 
-# -----------------------------
-# DCF Calculations
-# -----------------------------
 revenues = []
 ebit_values = []
 nopat_values = []
@@ -188,50 +186,24 @@ enterprise_value = sum(pv_fcf_values) + pv_terminal_value
 equity_value = enterprise_value - debt + cash
 intrinsic_value_per_share = equity_value / shares_outstanding
 
-upside_downside = None
-if current_price is not None and current_price > 0:
-    upside_downside = ((intrinsic_value_per_share - current_price) / current_price) * 100
+upside_downside = ((intrinsic_value_per_share - current_price) / current_price) * 100
 
-# -----------------------------
-# Summary Metrics
-# -----------------------------
 st.subheader(f"{ticker} Valuation Summary")
 
 col1, col2, col3, col4 = st.columns(4)
 
-col1.metric(
-    "Current Market Price",
-    f"${current_price:,.2f}" if current_price is not None else "Unavailable"
-)
+col1.metric("Current Market Price", f"${current_price:,.2f}")
+col2.metric("Intrinsic Value", f"${intrinsic_value_per_share:,.2f}")
+col3.metric("Enterprise Value", f"${enterprise_value:,.0f}M")
+col4.metric("Upside / Downside", f"{upside_downside:,.2f}%")
 
-col2.metric(
-    "Intrinsic Value",
-    f"${intrinsic_value_per_share:,.2f}"
-)
-
-col3.metric(
-    "Enterprise Value",
-    f"${enterprise_value:,.0f}M"
-)
-
-col4.metric(
-    "Upside / Downside",
-    f"{upside_downside:,.2f}%" if upside_downside is not None else "Unavailable"
-)
-
-if upside_downside is not None:
-    if intrinsic_value_per_share > current_price:
-        st.success("Based on your assumptions, the stock appears undervalued.")
-    elif intrinsic_value_per_share < current_price:
-        st.warning("Based on your assumptions, the stock appears overvalued.")
-    else:
-        st.info("Based on your assumptions, the stock appears fairly valued.")
+if intrinsic_value_per_share > current_price:
+    st.success("Based on your assumptions, the stock appears undervalued.")
+elif intrinsic_value_per_share < current_price:
+    st.warning("Based on your assumptions, the stock appears overvalued.")
 else:
-    st.info("Market price could not be loaded, but the DCF valuation still works.")
+    st.info("Based on your assumptions, the stock appears fairly valued.")
 
-# -----------------------------
-# Projection Table
-# -----------------------------
 df = pd.DataFrame({
     "Year": np.arange(1, projection_years + 1),
     "Revenue": revenues,
@@ -253,9 +225,6 @@ st.dataframe(df.style.format({
     "PV of FCF": "${:,.2f}M"
 }))
 
-# -----------------------------
-# Charts
-# -----------------------------
 chart_col1, chart_col2 = st.columns(2)
 
 with chart_col1:
@@ -279,9 +248,6 @@ with chart_col2:
     )
     st.plotly_chart(fig_fcf, use_container_width=True)
 
-# -----------------------------
-# Valuation Breakdown
-# -----------------------------
 st.subheader("Valuation Breakdown")
 
 breakdown = pd.DataFrame({
@@ -309,9 +275,6 @@ breakdown = pd.DataFrame({
 
 st.dataframe(breakdown.style.format({"Value": "{:,.2f}"}))
 
-# -----------------------------
-# Quick Explanation
-# -----------------------------
 st.subheader("Quick Explanation")
 
 with st.expander("What is this page calculating?"):
