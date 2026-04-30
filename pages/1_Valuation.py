@@ -19,84 +19,96 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.title("📈 DCF Valuation Model")
-st.write("Estimate a stock’s intrinsic value using real company data and realistic assumptions.")
+st.write("Estimate a stock’s intrinsic value and compare it to the current market price.")
 
 st.sidebar.header("Valuation Inputs")
-
 ticker = st.sidebar.text_input("Stock Ticker", value="TSM").upper()
 
 
 # -----------------------------
-# MARKET PRICE (FIXED VERSION)
+# Yahoo Finance Pulls
 # -----------------------------
 @st.cache_data(ttl=300)
 def get_market_price(stock_ticker):
     try:
         stock = yf.Ticker(stock_ticker)
 
-        # fast + reliable
-        price = stock.fast_info.get("last_price", None)
+        try:
+            price = stock.fast_info.get("last_price", None)
+            if price is not None:
+                return float(price)
+        except Exception:
+            pass
 
-        if price is not None:
-            return float(price)
-
-        # fallback
-        price_data = stock.history(period="1d")
-        if not price_data.empty:
-            return float(price_data["Close"].iloc[-1])
+        price_data = stock.history(period="5d")
+        if price_data is not None and not price_data.empty:
+            return float(price_data["Close"].dropna().iloc[-1])
 
         return None
-
     except Exception:
         return None
 
 
-# -----------------------------
-# YAHOO DATA
-# -----------------------------
 @st.cache_data(ttl=3600)
 def get_yahoo_data(stock_ticker):
     try:
         stock = yf.Ticker(stock_ticker)
-        income_stmt = stock.financials
-        balance_sheet = stock.balance_sheet
-        info = stock.info
-        return income_stmt, balance_sheet, info
+        return stock.financials, stock.balance_sheet, stock.cashflow, stock.info
     except Exception:
-        return pd.DataFrame(), pd.DataFrame(), {}
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {}
 
 
-def get_value(statement, labels):
-    for label in labels:
-        if label in statement.index:
-            vals = statement.loc[label].dropna()
-            if not vals.empty:
-                return float(vals.iloc[0]) / 1_000_000
-    return None
+def get_statement_value(statement, labels, fallback):
+    try:
+        for label in labels:
+            if label in statement.index:
+                values = statement.loc[label].dropna()
+                if not values.empty:
+                    return float(values.iloc[0]) / 1_000_000
+    except Exception:
+        pass
+    return fallback
 
 
-def get_series(statement, labels):
-    for label in labels:
-        if label in statement.index:
-            return statement.loc[label].dropna() / 1_000_000
+def get_statement_series(statement, labels):
+    try:
+        for label in labels:
+            if label in statement.index:
+                values = statement.loc[label].dropna()
+                if not values.empty:
+                    return values.astype(float) / 1_000_000
+    except Exception:
+        pass
     return pd.Series(dtype=float)
 
 
-# -----------------------------
-# LOAD DATA
-# -----------------------------
+def slider_bounds(series, fallback_min, fallback_max, padding=0.03):
+    series = pd.Series(series).replace([np.inf, -np.inf], np.nan).dropna()
+
+    if series.empty:
+        return fallback_min, fallback_max
+
+    low = max(0.0, float(series.min()) - padding)
+    high = float(series.max()) + padding
+
+    if low >= high:
+        return fallback_min, fallback_max
+
+    return round(low * 100, 1), round(high * 100, 1)
+
+
 current_price = get_market_price(ticker)
-income_stmt, balance_sheet, info = get_yahoo_data(ticker)
+income_stmt, balance_sheet, cashflow, info = get_yahoo_data(ticker)
 
 
 # -----------------------------
-# MARKET PRICE UI
+# Market Price
 # -----------------------------
 st.sidebar.subheader("Market Price")
 
 use_manual_price = st.sidebar.checkbox(
     "Use manual market price",
-    value=False
+    value=False if current_price is not None else True
 )
 
 manual_price = st.sidebar.number_input(
@@ -111,171 +123,389 @@ else:
     final_price = current_price
 
 if current_price is None:
-    st.sidebar.error("Could not load live price — using manual input.")
+    st.sidebar.error("Live market price could not load. Manual price is being used.")
 else:
-    st.sidebar.success(f"Live price: ${current_price:,.2f}")
+    st.sidebar.success(f"Live price loaded: ${current_price:,.2f}")
 
 
 # -----------------------------
-# LOCKED INPUTS
+# Locked Yahoo Finance Inputs
 # -----------------------------
-starting_revenue = get_value(income_stmt, ["Total Revenue"]) or 90000
-debt = get_value(balance_sheet, ["Total Debt"]) or 30000
-cash = get_value(balance_sheet, ["Cash And Cash Equivalents"]) or 50000
+starting_revenue = get_statement_value(
+    income_stmt,
+    ["Total Revenue", "Revenue"],
+    90000.0
+)
 
-shares_outstanding = info.get("sharesOutstanding")
-if shares_outstanding:
-    shares_outstanding = shares_outstanding / 1_000_000
-else:
-    shares_outstanding = 5186
+debt = get_statement_value(
+    balance_sheet,
+    ["Total Debt", "Long Term Debt And Capital Lease Obligation", "Long Term Debt"],
+    30000.0
+)
+
+cash = get_statement_value(
+    balance_sheet,
+    ["Cash And Cash Equivalents", "Cash Cash Equivalents And Short Term Investments"],
+    50000.0
+)
+
+try:
+    shares_outstanding = float(info.get("sharesOutstanding")) / 1_000_000
+except Exception:
+    shares_outstanding = 5186.0
+
+if shares_outstanding <= 0:
+    shares_outstanding = 5186.0
 
 
+# -----------------------------
+# Operating Assumptions
+# -----------------------------
 st.sidebar.subheader("Operating Assumptions")
 
 st.sidebar.metric("Starting Revenue", f"${starting_revenue:,.0f}M")
-st.sidebar.caption("Locked from Yahoo Finance")
+st.sidebar.caption("Pulled from Yahoo Finance and locked.")
+
+historical_revenue = get_statement_series(income_stmt, ["Total Revenue", "Revenue"])
+historical_ebit = get_statement_series(income_stmt, ["EBIT", "Operating Income"])
+historical_tax = get_statement_series(income_stmt, ["Tax Provision", "Income Tax Expense"])
+historical_pretax = get_statement_series(income_stmt, ["Pretax Income", "Income Before Tax"])
+historical_capex = get_statement_series(cashflow, ["Capital Expenditure", "Capital Expenditures"])
+historical_net_income = get_statement_series(income_stmt, ["Net Income", "Net Income Common Stockholders"])
 
 
-# -----------------------------
-# HISTORICAL DATA
-# -----------------------------
-rev = get_series(income_stmt, ["Total Revenue"])
-ebit = get_series(income_stmt, ["Operating Income"])
-tax = get_series(income_stmt, ["Tax Provision"])
-pretax = get_series(income_stmt, ["Pretax Income"])
-
-
-# Growth
-growth_hist = rev.pct_change().dropna()
-growth_avg = growth_hist.mean() if not growth_hist.empty else 0.10
+# Revenue growth
+revenue_growth_rates = historical_revenue.sort_index().pct_change().dropna()
+growth_avg = revenue_growth_rates.mean() if not revenue_growth_rates.empty else 0.10
+growth_min, growth_max = slider_bounds(revenue_growth_rates, 0.0, 0.30, padding=0.03)
+growth_default = round(growth_avg * 100, 1)
+growth_default = min(max(growth_default, growth_min), growth_max)
 
 growth_rate = st.sidebar.slider(
-    "Revenue Growth (%)",
-    0.0, 25.0,
-    float(round(growth_avg * 100, 1)),
-    0.5
+    "Annual Revenue Growth Rate (%)",
+    min_value=float(growth_min),
+    max_value=float(growth_max),
+    value=float(growth_default),
+    step=0.5
 ) / 100
 
-st.sidebar.caption(f"Avg: {growth_avg:.1%}")
+st.sidebar.caption(f"Recent historical average: {growth_avg:.1%}")
 
 
 # EBIT margin
-margin_hist = (ebit / rev).dropna()
-margin_avg = margin_hist.mean() if not margin_hist.empty else 0.45
+if not historical_revenue.empty and not historical_ebit.empty:
+    common_dates = historical_revenue.index.intersection(historical_ebit.index)
+    ebit_margins = historical_ebit.loc[common_dates] / historical_revenue.loc[common_dates]
+else:
+    ebit_margins = pd.Series(dtype=float)
+
+ebit_avg = ebit_margins.mean() if not ebit_margins.empty else 0.45
+ebit_min, ebit_max = slider_bounds(ebit_margins, 0.20, 0.60, padding=0.03)
+ebit_default = round(ebit_avg * 100, 1)
+ebit_default = min(max(ebit_default, ebit_min), ebit_max)
 
 ebit_margin = st.sidebar.slider(
     "EBIT Margin (%)",
-    20.0, 60.0,
-    float(round(margin_avg * 100, 1)),
-    0.5
+    min_value=float(ebit_min),
+    max_value=float(ebit_max),
+    value=float(ebit_default),
+    step=0.5
 ) / 100
 
-st.sidebar.caption(f"Avg: {margin_avg:.1%}")
+st.sidebar.caption(f"Recent historical average: {ebit_avg:.1%}")
 
 
 # Tax rate
-tax_hist = (tax / pretax).dropna()
-tax_avg = tax_hist.mean() if not tax_hist.empty else 0.20
+if not historical_tax.empty and not historical_pretax.empty:
+    common_dates = historical_tax.index.intersection(historical_pretax.index)
+    tax_rates = historical_tax.loc[common_dates] / historical_pretax.loc[common_dates]
+    tax_rates = tax_rates[(tax_rates >= 0) & (tax_rates <= 0.50)]
+else:
+    tax_rates = pd.Series(dtype=float)
+
+tax_avg = tax_rates.mean() if not tax_rates.empty else 0.20
+tax_min, tax_max = slider_bounds(tax_rates, 0.05, 0.35, padding=0.03)
+tax_default = round(tax_avg * 100, 1)
+tax_default = min(max(tax_default, tax_min), tax_max)
 
 tax_rate = st.sidebar.slider(
     "Tax Rate (%)",
-    5.0, 35.0,
-    float(round(tax_avg * 100, 1)),
-    0.5
+    min_value=float(tax_min),
+    max_value=float(tax_max),
+    value=float(tax_default),
+    step=0.5
 ) / 100
 
-st.sidebar.caption(f"Avg: {tax_avg:.1%}")
+st.sidebar.caption(f"Recent historical average: {tax_avg:.1%}")
 
 
-# Reinvestment (simplified realistic range)
+# Reinvestment rate
+if not historical_capex.empty and not historical_net_income.empty:
+    common_dates = historical_capex.index.intersection(historical_net_income.index)
+    reinvestment_rates = abs(historical_capex.loc[common_dates]) / historical_net_income.loc[common_dates]
+    reinvestment_rates = reinvestment_rates[(reinvestment_rates >= 0) & (reinvestment_rates <= 1.00)]
+else:
+    reinvestment_rates = pd.Series(dtype=float)
+
+reinv_avg = reinvestment_rates.mean() if not reinvestment_rates.empty else 0.35
+reinv_min, reinv_max = slider_bounds(reinvestment_rates, 0.10, 0.70, padding=0.05)
+reinv_default = round(reinv_avg * 100, 1)
+reinv_default = min(max(reinv_default, reinv_min), reinv_max)
+
 reinvestment_rate = st.sidebar.slider(
     "Reinvestment Rate (%)",
-    10.0, 60.0,
-    35.0,
-    0.5
+    min_value=float(reinv_min),
+    max_value=float(reinv_max),
+    value=float(reinv_default),
+    step=0.5
 ) / 100
 
-st.sidebar.caption("Typical corporate range")
+st.sidebar.caption(f"Recent historical average: {reinv_avg:.1%}")
 
 
 # -----------------------------
-# VALUATION ASSUMPTIONS
+# Valuation Assumptions
 # -----------------------------
 st.sidebar.subheader("Valuation Assumptions")
 
-wacc = st.sidebar.slider("WACC (%)", 6.0, 14.0, 9.0, 0.5) / 100
-terminal_growth = st.sidebar.slider("Terminal Growth (%)", 1.0, 4.0, 3.0, 0.25) / 100
-years = st.sidebar.slider("Projection Years", 3, 10, 5)
+wacc = st.sidebar.slider(
+    "WACC / Discount Rate (%)",
+    min_value=6.0,
+    max_value=14.0,
+    value=9.0,
+    step=0.5
+) / 100
+
+terminal_growth = st.sidebar.slider(
+    "Terminal Growth Rate (%)",
+    min_value=1.0,
+    max_value=4.0,
+    value=3.0,
+    step=0.25
+) / 100
+
+projection_years = st.sidebar.slider(
+    "Projection Years",
+    min_value=3,
+    max_value=10,
+    value=5
+)
 
 
 # -----------------------------
-# BALANCE SHEET (LOCKED)
+# Locked Balance Sheet Assumptions
 # -----------------------------
-st.sidebar.subheader("Balance Sheet")
+st.sidebar.subheader("Balance Sheet Assumptions")
 
-st.sidebar.metric("Debt", f"${debt:,.0f}M")
-st.sidebar.metric("Cash", f"${cash:,.0f}M")
-st.sidebar.metric("Shares", f"{shares_outstanding:,.0f}M")
+st.sidebar.metric("Total Debt", f"${debt:,.0f}M")
+st.sidebar.metric("Cash & Equivalents", f"${cash:,.0f}M")
+st.sidebar.metric("Shares Outstanding", f"{shares_outstanding:,.0f}M")
+st.sidebar.caption("Pulled from Yahoo Finance and locked.")
 
 
 # -----------------------------
-# DCF
+# Safety Checks
+# -----------------------------
+if wacc <= terminal_growth:
+    st.error("WACC must be greater than the terminal growth rate.")
+    st.stop()
+
+if shares_outstanding <= 0:
+    st.error("Shares outstanding must be greater than zero.")
+    st.stop()
+
+
+# -----------------------------
+# DCF Calculations
 # -----------------------------
 revenues = []
-fcfs = []
-pv_fcfs = []
+ebit_values = []
+nopat_values = []
+reinvestment_values = []
+fcf_values = []
+pv_fcf_values = []
 
-rev_val = starting_revenue
+revenue = starting_revenue
 
-for t in range(1, years + 1):
-    rev_val *= (1 + growth_rate)
-    ebit_val = rev_val * ebit_margin
-    nopat = ebit_val * (1 - tax_rate)
-    reinvest = nopat * reinvestment_rate
-    fcf = nopat - reinvest
+for year in range(1, projection_years + 1):
+    revenue = revenue * (1 + growth_rate)
+    ebit = revenue * ebit_margin
+    nopat = ebit * (1 - tax_rate)
+    reinvestment = nopat * reinvestment_rate
+    fcf = nopat - reinvestment
+    pv_fcf = fcf / ((1 + wacc) ** year)
 
-    pv = fcf / ((1 + wacc) ** t)
+    revenues.append(revenue)
+    ebit_values.append(ebit)
+    nopat_values.append(nopat)
+    reinvestment_values.append(reinvestment)
+    fcf_values.append(fcf)
+    pv_fcf_values.append(pv_fcf)
 
-    revenues.append(rev_val)
-    fcfs.append(fcf)
-    pv_fcfs.append(pv)
+terminal_value = fcf_values[-1] * (1 + terminal_growth) / (wacc - terminal_growth)
+pv_terminal_value = terminal_value / ((1 + wacc) ** projection_years)
 
-terminal_value = fcfs[-1] * (1 + terminal_growth) / (wacc - terminal_growth)
-pv_terminal = terminal_value / ((1 + wacc) ** years)
-
-enterprise_value = sum(pv_fcfs) + pv_terminal
+enterprise_value = sum(pv_fcf_values) + pv_terminal_value
 equity_value = enterprise_value - debt + cash
-intrinsic_value = equity_value / shares_outstanding
+intrinsic_value_per_share = equity_value / shares_outstanding
 
-upside = (intrinsic_value - final_price) / final_price * 100
+upside_downside = ((intrinsic_value_per_share - final_price) / final_price) * 100
 
 
 # -----------------------------
-# OUTPUT
+# Valuation Summary
 # -----------------------------
-st.subheader(f"{ticker} Valuation")
+st.subheader(f"{ticker} Valuation Summary")
 
-c1, c2, c3, c4 = st.columns(4)
+col1, col2, col3, col4 = st.columns(4)
 
-c1.metric("Market Price", f"${final_price:,.2f}")
-c2.metric("Intrinsic Value", f"${intrinsic_value:,.2f}")
-c3.metric("Enterprise Value", f"${enterprise_value:,.0f}M")
-c4.metric("Upside", f"{upside:.2f}%")
+col1.metric("Current Market Price", f"${final_price:,.2f}")
+col2.metric("Intrinsic Value", f"${intrinsic_value_per_share:,.2f}")
+col3.metric("Enterprise Value", f"${enterprise_value:,.0f}M")
+col4.metric("Upside / Downside", f"{upside_downside:,.2f}%")
 
-if intrinsic_value > final_price:
-    st.success("Undervalued")
+if intrinsic_value_per_share > final_price:
+    st.success("Based on your assumptions, the stock appears undervalued.")
+elif intrinsic_value_per_share < final_price:
+    st.warning("Based on your assumptions, the stock appears overvalued.")
 else:
-    st.warning("Overvalued")
+    st.info("Based on your assumptions, the stock appears fairly valued.")
 
 
 # -----------------------------
-# CHART
+# Yahoo Finance Inputs Table
 # -----------------------------
-df = pd.DataFrame({
-    "Year": range(1, years + 1),
-    "Revenue": revenues,
-    "FCF": fcfs
+st.subheader("Yahoo Finance Inputs Used in the Model")
+
+locked_inputs = pd.DataFrame({
+    "Input": [
+        "Starting Revenue",
+        "Total Debt",
+        "Cash & Equivalents",
+        "Shares Outstanding"
+    ],
+    "Value": [
+        f"${starting_revenue:,.0f}M",
+        f"${debt:,.0f}M",
+        f"${cash:,.0f}M",
+        f"{shares_outstanding:,.0f}M"
+    ],
+    "User Editable?": ["No", "No", "No", "No"]
 })
 
-fig = px.line(df, x="Year", y="Revenue", title="Revenue Projection")
-st.plotly_chart(fig, use_container_width=True)
+st.dataframe(locked_inputs, use_container_width=True)
+
+
+# -----------------------------
+# DCF Projection Table
+# -----------------------------
+df = pd.DataFrame({
+    "Year": np.arange(1, projection_years + 1),
+    "Revenue": revenues,
+    "EBIT": ebit_values,
+    "NOPAT": nopat_values,
+    "Reinvestment": reinvestment_values,
+    "Free Cash Flow": fcf_values,
+    "PV of FCF": pv_fcf_values
+})
+
+st.subheader("Step-by-Step DCF Projection")
+
+st.dataframe(df.style.format({
+    "Revenue": "${:,.2f}M",
+    "EBIT": "${:,.2f}M",
+    "NOPAT": "${:,.2f}M",
+    "Reinvestment": "${:,.2f}M",
+    "Free Cash Flow": "${:,.2f}M",
+    "PV of FCF": "${:,.2f}M"
+}), use_container_width=True)
+
+
+# -----------------------------
+# Original Visuals Brought Back
+# -----------------------------
+chart_col1, chart_col2 = st.columns(2)
+
+with chart_col1:
+    st.subheader("Projected Revenue")
+    fig_revenue = px.line(
+        df,
+        x="Year",
+        y="Revenue",
+        markers=True,
+        title="Revenue Projection"
+    )
+    st.plotly_chart(fig_revenue, use_container_width=True)
+
+with chart_col2:
+    st.subheader("Projected Free Cash Flow")
+    fig_fcf = px.bar(
+        df,
+        x="Year",
+        y="Free Cash Flow",
+        title="Free Cash Flow Projection"
+    )
+    st.plotly_chart(fig_fcf, use_container_width=True)
+
+
+# -----------------------------
+# Valuation Breakdown
+# -----------------------------
+st.subheader("Valuation Breakdown")
+
+breakdown = pd.DataFrame({
+    "Component": [
+        "PV of Projected Free Cash Flows",
+        "PV of Terminal Value",
+        "Enterprise Value",
+        "Less: Debt",
+        "Add: Cash",
+        "Equity Value",
+        "Shares Outstanding",
+        "Intrinsic Value Per Share"
+    ],
+    "Value": [
+        sum(pv_fcf_values),
+        pv_terminal_value,
+        enterprise_value,
+        debt,
+        cash,
+        equity_value,
+        shares_outstanding,
+        intrinsic_value_per_share
+    ]
+})
+
+st.dataframe(breakdown.style.format({"Value": "{:,.2f}"}), use_container_width=True)
+
+
+# -----------------------------
+# Quick Explanation
+# -----------------------------
+st.subheader("Quick Explanation")
+
+with st.expander("What changed on this page?"):
+    st.write("""
+    Starting revenue, total debt, cash and equivalents, and shares outstanding are pulled from Yahoo Finance.
+    These values are locked so the user cannot manually change the company's actual financial starting point.
+    """)
+
+with st.expander("Why are the sliders more realistic now?"):
+    st.write("""
+    The adjustable assumptions use historical Yahoo Finance data when available.
+    This helps keep the DCF model grounded in the company's past performance instead of allowing unrealistic assumptions.
+    """)
+
+with st.expander("What is this page calculating?"):
+    st.write("""
+    This page estimates company value by projecting free cash flow, discounting it back to today using WACC,
+    calculating terminal value, and then adjusting enterprise value for debt, cash, and shares outstanding.
+    """)
+
+with st.expander("Why do assumptions matter?"):
+    st.write("""
+    Small changes in growth rate, WACC, terminal growth, and margins can create large changes in the final valuation.
+    This is why DCF models are useful, but also sensitive to assumptions.
+    """)
+
+st.caption("All values are estimates and depend on Yahoo Finance data availability and user-selected assumptions.")
