@@ -15,20 +15,6 @@ st.markdown("""
 .stApp {
     background: linear-gradient(135deg, #eef2ff 0%, #f8fafc 45%, #e0f2fe 100%);
 }
-.formula-card {
-    background-color: white;
-    padding: 18px;
-    border-radius: 16px;
-    box-shadow: 0px 4px 15px rgba(0,0,0,0.08);
-    margin-bottom: 14px;
-}
-.formula-box {
-    background-color: #f1f5f9;
-    padding: 10px;
-    border-radius: 10px;
-    font-family: monospace;
-    color: #0f172a;
-}
 </style>
 """, unsafe_allow_html=True)
 
@@ -39,9 +25,6 @@ st.sidebar.header("Valuation Inputs")
 ticker = st.sidebar.text_input("Stock Ticker", value="TSM").upper()
 
 
-# -----------------------------
-# Yahoo Finance Pulls
-# -----------------------------
 @st.cache_data(ttl=300)
 def get_market_price(stock_ticker):
     try:
@@ -168,7 +151,7 @@ try:
 except Exception:
     shares_outstanding = 5186.0
 
- if shares_outstanding <= 0:
+if shares_outstanding <= 0:
     shares_outstanding = 5186.0
 
 
@@ -546,14 +529,6 @@ formula_df = pd.DataFrame({
 })
 
 st.dataframe(formula_df, use_container_width=True)
-
-with st.expander("How to read this formula breakdown"):
-    st.write("""
-    This section connects the model formulas directly to the selected inputs.
-    For example, EBIT is calculated by multiplying projected revenue by the selected EBIT margin.
-    As the user changes growth rate, EBIT margin, tax rate, reinvestment rate, WACC, or terminal growth,
-    the formula calculations update automatically.
-    """)
 
 
 # -----------------------------
