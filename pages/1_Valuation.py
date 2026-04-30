@@ -15,6 +15,20 @@ st.markdown("""
 .stApp {
     background: linear-gradient(135deg, #eef2ff 0%, #f8fafc 45%, #e0f2fe 100%);
 }
+.formula-card {
+    background-color: white;
+    padding: 18px;
+    border-radius: 16px;
+    box-shadow: 0px 4px 15px rgba(0,0,0,0.08);
+    margin-bottom: 14px;
+}
+.formula-box {
+    background-color: #f1f5f9;
+    padding: 10px;
+    border-radius: 10px;
+    font-family: monospace;
+    color: #0f172a;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -154,7 +168,7 @@ try:
 except Exception:
     shares_outstanding = 5186.0
 
-if shares_outstanding <= 0:
+ if shares_outstanding <= 0:
     shares_outstanding = 5186.0
 
 
@@ -174,7 +188,7 @@ historical_capex = get_statement_series(cashflow, ["Capital Expenditure", "Capit
 historical_net_income = get_statement_series(income_stmt, ["Net Income", "Net Income Common Stockholders"])
 
 
-# Revenue growth
+# Revenue Growth
 revenue_growth_rates = historical_revenue.sort_index().pct_change().dropna()
 growth_avg = revenue_growth_rates.mean() if not revenue_growth_rates.empty else 0.10
 growth_min, growth_max = slider_bounds(revenue_growth_rates, 0.0, 0.30, padding=0.03)
@@ -192,7 +206,7 @@ growth_rate = st.sidebar.slider(
 st.sidebar.caption(f"Recent historical average: {growth_avg:.1%}")
 
 
-# EBIT margin
+# EBIT Margin
 if not historical_revenue.empty and not historical_ebit.empty:
     common_dates = historical_revenue.index.intersection(historical_ebit.index)
     ebit_margins = historical_ebit.loc[common_dates] / historical_revenue.loc[common_dates]
@@ -215,7 +229,7 @@ ebit_margin = st.sidebar.slider(
 st.sidebar.caption(f"Recent historical average: {ebit_avg:.1%}")
 
 
-# Tax rate
+# Tax Rate
 if not historical_tax.empty and not historical_pretax.empty:
     common_dates = historical_tax.index.intersection(historical_pretax.index)
     tax_rates = historical_tax.loc[common_dates] / historical_pretax.loc[common_dates]
@@ -239,7 +253,7 @@ tax_rate = st.sidebar.slider(
 st.sidebar.caption(f"Recent historical average: {tax_avg:.1%}")
 
 
-# Reinvestment rate
+# Reinvestment Rate
 if not historical_capex.empty and not historical_net_income.empty:
     common_dates = historical_capex.index.intersection(historical_net_income.index)
     reinvestment_rates = abs(historical_capex.loc[common_dates]) / historical_net_income.loc[common_dates]
@@ -422,7 +436,7 @@ st.dataframe(df.style.format({
 
 
 # -----------------------------
-# Original Visuals Brought Back
+# Visuals
 # -----------------------------
 chart_col1, chart_col2 = st.columns(2)
 
@@ -477,6 +491,69 @@ breakdown = pd.DataFrame({
 })
 
 st.dataframe(breakdown.style.format({"Value": "{:,.2f}"}), use_container_width=True)
+
+
+# -----------------------------
+# Formula Breakdown
+# -----------------------------
+st.subheader("Formula Breakdown Using Selected Inputs")
+
+first_year_revenue = revenues[0]
+first_year_ebit = ebit_values[0]
+first_year_nopat = nopat_values[0]
+first_year_reinvestment = reinvestment_values[0]
+first_year_fcf = fcf_values[0]
+first_year_pv_fcf = pv_fcf_values[0]
+final_year_fcf = fcf_values[-1]
+
+formula_df = pd.DataFrame({
+    "Step": [
+        "1. Revenue Projection",
+        "2. EBIT",
+        "3. NOPAT",
+        "4. Reinvestment",
+        "5. Free Cash Flow",
+        "6. Present Value of FCF",
+        "7. Terminal Value",
+        "8. Enterprise Value",
+        "9. Equity Value",
+        "10. Intrinsic Value Per Share"
+    ],
+    "Formula": [
+        "Revenue next year = Revenue this year × (1 + Growth Rate)",
+        "EBIT = Revenue × EBIT Margin",
+        "NOPAT = EBIT × (1 − Tax Rate)",
+        "Reinvestment = NOPAT × Reinvestment Rate",
+        "Free Cash Flow = NOPAT − Reinvestment",
+        "PV of FCF = FCF ÷ (1 + WACC)^Year",
+        "Terminal Value = Final Year FCF × (1 + Terminal Growth) ÷ (WACC − Terminal Growth)",
+        "Enterprise Value = PV of Projected FCF + PV of Terminal Value",
+        "Equity Value = Enterprise Value − Debt + Cash",
+        "Intrinsic Value Per Share = Equity Value ÷ Shares Outstanding"
+    ],
+    "Calculation Using Current Inputs": [
+        f"${starting_revenue:,.2f}M × (1 + {growth_rate:.2%}) = ${first_year_revenue:,.2f}M",
+        f"${first_year_revenue:,.2f}M × {ebit_margin:.2%} = ${first_year_ebit:,.2f}M",
+        f"${first_year_ebit:,.2f}M × (1 − {tax_rate:.2%}) = ${first_year_nopat:,.2f}M",
+        f"${first_year_nopat:,.2f}M × {reinvestment_rate:.2%} = ${first_year_reinvestment:,.2f}M",
+        f"${first_year_nopat:,.2f}M − ${first_year_reinvestment:,.2f}M = ${first_year_fcf:,.2f}M",
+        f"${first_year_fcf:,.2f}M ÷ (1 + {wacc:.2%})^1 = ${first_year_pv_fcf:,.2f}M",
+        f"${final_year_fcf:,.2f}M × (1 + {terminal_growth:.2%}) ÷ ({wacc:.2%} − {terminal_growth:.2%}) = ${terminal_value:,.2f}M",
+        f"${sum(pv_fcf_values):,.2f}M + ${pv_terminal_value:,.2f}M = ${enterprise_value:,.2f}M",
+        f"${enterprise_value:,.2f}M − ${debt:,.2f}M + ${cash:,.2f}M = ${equity_value:,.2f}M",
+        f"${equity_value:,.2f}M ÷ {shares_outstanding:,.2f}M shares = ${intrinsic_value_per_share:,.2f}"
+    ]
+})
+
+st.dataframe(formula_df, use_container_width=True)
+
+with st.expander("How to read this formula breakdown"):
+    st.write("""
+    This section connects the model formulas directly to the selected inputs.
+    For example, EBIT is calculated by multiplying projected revenue by the selected EBIT margin.
+    As the user changes growth rate, EBIT margin, tax rate, reinvestment rate, WACC, or terminal growth,
+    the formula calculations update automatically.
+    """)
 
 
 # -----------------------------
